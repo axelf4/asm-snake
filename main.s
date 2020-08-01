@@ -57,8 +57,8 @@ MILLI_TO_NANO = 1000000
 .endm
 
 .macro sleep duration=1
-	pushq MILLI_TO_NANO * 0 # Nanoseconds
-	pushq \duration # Seconds
+	pushq MILLI_TO_NANO * \duration # Nanoseconds
+	pushq 0 # Seconds
 	mov eax, SYS_nanosleep # use the nanosleep syscall
 	mov rdi, rsp
 	xor esi, esi # rem=NULL (writing 32-bit register zeros upper 32 bits)
@@ -74,15 +74,15 @@ mov rdx, O_RDONLY | O_NONBLOCK
 syscall
 .endm
 
+# Clobbers: rax, rcx, rdx, r8, r9
 # Note: n has to be positive
 .macro itoa n=3
 	# First count the number of digits
-	mov r8w, \n
-	lzcnt r9w, r8w
-	mov ax, 16 + 1
+	mov r8d, \n
+	lzcnt r9d, r8d
+	mov ax, 32 + 1
 	sub ax, r9w
-	mov r9, 1233
-	mul r9
+	mov edx, 1233; mul edx
 	shr rax, 12
 	# Now ax=#digits-1, r8=original number. Let's write the digits:
 
@@ -92,8 +92,8 @@ syscall
 	mov ecx, r9d # Count down the digits with ecx
 	0:
 	xor edx, edx
-	mov r10, 10
-	div r10d # TODO Optimize away slow div
+	mov r8, 10
+	div r8d # TODO Optimize away slow div
 	# Quotient is stored in eax, and remainder in edx
 
 	add dl, '0'
@@ -102,8 +102,11 @@ syscall
 	sub ecx, 1; jae 0b
 
 	add rdi, r9
-	add rdi, 1
+	inc rdi
 .endm
+
+NUM_SEGMENTS = 16
+SEGMENT_BYTES = 8
 
 .text
 _start:
@@ -120,12 +123,19 @@ _start:
 	mov byte ptr [rsp+17+VMIN], 0
 	mov byte ptr [rsp+17+VTIME], 0
 
-	# Write new
+	# Write new terminal settings
 	movq rax, SYS_ioctl
 	movq rdi, STDIN
 	movq rsi, TCSETS
 	leaq rdx, [rsp]
 	syscall
+
+	mov r12d, 0 # Store direction in r12
+	# Allocate storage for snake on stack
+	sub rsp, /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES
+	mov dword ptr [rsp], 1 # Start with single segment
+	mov dword ptr [rsp+4], 20 # x-coord of first segment
+	mov dword ptr [rsp+4+4], 10 # y-coord of first segment
 
 	loop:
 
@@ -143,18 +153,42 @@ _start:
 	jne read_loop
 	pop rax
 
+	cmp rax, 'w'; jne 0f
+	mov r12d, 0; jmp 1f
+	0: cmp rax, 'a'; jne 0f
+	mov r12d, 1; jmp 1f
+	0: cmp rax, 's'; jne 0f
+	mov r12d, 2; jmp 1f
+	0: cmp rax, 'd'; jne 1f
+	mov r12d, 3; jmp 1f
+	1:
+
+	cmp r12d, 0; jne 0f
+	dec dword ptr [rsp+4+4]; jmp 1f
+	0: cmp r12d, 1; jne 0f
+	dec dword ptr [rsp+4]; jmp 1f
+	0: cmp r12d, 2; jne 0f
+	inc dword ptr [rsp+4+4]; jmp 1f
+	0: cmp r12d, 3; jne 1f
+	inc dword ptr [rsp+4]; jmp 1f
+	1:
+
 	write clearScreen, clearScreen.len
 	write Hello, Hello.len
+
+	# Draw all segments
+	mov r10d, [rsp+4] # Store x-coord in r10
+	mov r11d, [rsp+4+4] # Store y-coord in r11
 
 	sub rsp, 32
 	mov rdi, rsp
 	mov byte ptr [rdi], 0x1B
 	mov byte ptr [rdi+1], '['
 	add rdi, 2
-	itoa 42
+	itoa r11d
 	mov byte ptr [rdi], '\;'
-	add rdi, 1
-	itoa 15
+	inc rdi
+	itoa r10d
 	mov byte ptr [rdi], 'H'
 	add rdi, 1
 	mov byte ptr [rdi], '#'
@@ -163,7 +197,7 @@ _start:
 	write [rsp], r8
 	add rsp, 32 # Dealloc stack
 
-	sleep 1
+	sleep 350
 
 	jmp loop
 
