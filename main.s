@@ -1,7 +1,7 @@
 .intel_syntax noprefix
 
 .section .rodata
-Hello: .ascii "Hello world!\n"
+Hello: .ascii "\x1B[0010;10HHello world!\n"
 Hello.len = . - Hello
 
 clearScreen: .ascii "\033[2J"
@@ -49,7 +49,8 @@ MILLI_TO_NANO = 1000000
 .macro write str, len
 	mov eax, SYS_write # use the write syscall
 	mov edi, STDOUT
-	mov rsi, offset flat: \str
+	# mov rsi, offset flat: \str
+	lea rsi, \str
 	mov rdx, \len # specify nr of characters
 	# Clobbers %rcx and %r11, and return value %rax
 	syscall
@@ -71,6 +72,37 @@ mov rdi, STDIN
 mov rsi, F_SETFL
 mov rdx, O_RDONLY | O_NONBLOCK
 syscall
+.endm
+
+# Note: n has to be positive
+.macro itoa n=3
+	# First count the number of digits
+	mov r8w, \n
+	lzcnt r9w, r8w
+	mov ax, 16 + 1
+	sub ax, r9w
+	mov r9, 1233
+	mul r9
+	shr rax, 12
+	# Now ax=#digits-1, r8=original number. Let's write the digits:
+
+	mov r9d, eax # Write #digits-1 to r9
+	mov eax, r8d # Write number to eax
+
+	mov ecx, r9d # Count down the digits with ecx
+	0:
+	xor edx, edx
+	mov r10, 10
+	div r10d # TODO Optimize away slow div
+	# Quotient is stored in eax, and remainder in edx
+
+	add dl, '0'
+	mov byte ptr [rdi+rcx], dl
+	# Decrement counter, and loop again if ecx ≥ 1
+	sub ecx, 1; jae 0b
+
+	add rdi, r9
+	add rdi, 1
 .endm
 
 .text
@@ -111,22 +143,29 @@ _start:
 	jne read_loop
 	pop rax
 
-	sleep 1
-
-	write Hello, Hello.len
-
-	jmp loop
-
-	xor ebx, ebx # zero edx
-
-	loop_start:
-
 	write clearScreen, clearScreen.len
 	write Hello, Hello.len
 
-	add ebx, 1
-	cmp ebx, 3
-	jl loop_start
+	sub rsp, 32
+	mov rdi, rsp
+	mov byte ptr [rdi], 0x1B
+	mov byte ptr [rdi+1], '['
+	add rdi, 2
+	itoa 42
+	mov byte ptr [rdi], '\;'
+	add rdi, 1
+	itoa 15
+	mov byte ptr [rdi], 'H'
+	add rdi, 1
+	mov byte ptr [rdi], '#'
+	add rdi, 1
+	mov r8, rdi; sub r8, rsp
+	write [rsp], r8
+	add rsp, 32 # Dealloc stack
+
+	sleep 1
+
+	jmp loop
 
 	movq rax, SYS_exit # _exit syscall
 	movq rdi, 0 # Exit code
