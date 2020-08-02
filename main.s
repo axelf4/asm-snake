@@ -107,7 +107,7 @@ syscall
 	inc rdi
 .endm
 
-NUM_SEGMENTS = 16
+NUM_SEGMENTS = 64 # The maximum number of segments
 SEGMENT_BYTES = 8
 
 .text
@@ -188,6 +188,7 @@ _start:
 	inc r8d; jmp 1f
 	1:
 
+	mov r11d, [rsp] # Store #segments in r11
 	# Increment current head index, wrapping if necessary
 	inc r9d
 	cmp r9d, [rsp]; jb 0f
@@ -200,8 +201,37 @@ _start:
 	mov [rsp+8+SEGMENT_BYTES*r9], r8d
 	mov [rsp+8+SEGMENT_BYTES*r9+4], r10d
 
+	APPLE_X = 25
+	APPLE_Y = 15
+
+	cmp r8d, APPLE_X; jne 0f
+	cmp r10d, APPLE_Y; jne 0f
+	# Ate apple
+	mov dword ptr [rsp+8+SEGMENT_BYTES*r11], APPLE_X
+	mov dword ptr [rsp+8+SEGMENT_BYTES*r11+4], APPLE_Y
+	inc dword ptr [rsp] # Increment segment count
+	0:
+
 	write clearScreen, clearScreen.len
 	write Hello, Hello.len
+
+	DRAW_BUF_SIZE = 32
+	sub rsp, DRAW_BUF_SIZE
+	mov rdi, rsp
+	mov byte ptr [rdi], 0x1B
+	mov byte ptr [rdi+1], '['
+	add rdi, 2
+	itoa APPLE_Y # y-coord
+	mov byte ptr [rdi], '\;'
+	inc rdi
+	itoa APPLE_X # x-coord
+	mov byte ptr [rdi], 'H'
+	add rdi, 1
+	mov byte ptr [rdi], 'o'
+	add rdi, 1
+	mov rdx, rdi; sub rdx, rsp
+	write [rsp], rdx
+	add rsp, DRAW_BUF_SIZE # Dealloc stack
 
 	# Draw all segments
 	draw_segment_loop:
@@ -210,7 +240,6 @@ _start:
 	xor r9d, r9d  # If i == #segment, set i to zero
 	0:
 
-	DRAW_BUF_SIZE = 32
 	sub rsp, DRAW_BUF_SIZE
 	mov rdi, rsp
 	mov byte ptr [rdi], 0x1B
