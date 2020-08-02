@@ -4,6 +4,8 @@
 Hello: .ascii "\x1B[0010;10HHello world!\n"
 Hello.len = . - Hello
 
+hideCursor: .ascii "\033[?25l"
+hideCursor.len = . - hideCursor
 clearScreen: .ascii "\033[2J"
 clearScreen.len = . - clearScreen
 
@@ -43,8 +45,6 @@ struct termios {
 */
 TERMIOS_SIZE = 60
 
-MILLI_TO_NANO = 1000000
-
 # write(stdout, str, len)
 .macro write str, len
 	mov eax, SYS_write # use the write syscall
@@ -56,9 +56,11 @@ MILLI_TO_NANO = 1000000
 	syscall
 .endm
 
-.macro sleep duration=1
-	pushq MILLI_TO_NANO * \duration # Nanoseconds
-	pushq 0 # Seconds
+MILLI_TO_NANO = 1000000
+
+.macro sleep nanoseconds, seconds=0
+	pushq \nanoseconds
+	pushq \seconds
 	mov eax, SYS_nanosleep # use the nanosleep syscall
 	mov rdi, rsp
 	xor esi, esi # rem=NULL (writing 32-bit register zeros upper 32 bits)
@@ -130,6 +132,8 @@ _start:
 	leaq rdx, [rsp]
 	syscall
 
+	# write hideCursor, hideCursor.len
+
 	mov r12d, 0 # Store direction in r12
 	# Allocate storage for snake on stack
 	sub rsp, /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES
@@ -197,7 +201,13 @@ _start:
 	write [rsp], r8
 	add rsp, 32 # Dealloc stack
 
-	sleep 350
+	# Move vertically at half speed (due to character aspect ratio)
+	mov rax, MILLI_TO_NANO * 350 / 2
+	bt r12, 0; jc 0f
+	mov rax, MILLI_TO_NANO * 350
+	0:
+
+	sleep rax
 
 	jmp loop
 
