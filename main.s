@@ -58,7 +58,7 @@ TERMIOS_SIZE = 60
 
 MILLI_TO_NANO = 1000000
 
-.macro sleep nanoseconds, seconds=0
+.macro sleep nanoseconds=0, seconds=0
 	pushq \nanoseconds
 	pushq \seconds
 	mov eax, SYS_nanosleep # use the nanosleep syscall
@@ -76,22 +76,22 @@ mov rdx, O_RDONLY | O_NONBLOCK
 syscall
 .endm
 
-# Clobbers: rax, rcx, rdx, r8, r9
+# Clobbers: rax, rcx, rdx, r8, r11
 # Note: n has to be positive
 .macro itoa n=3
 	# First count the number of digits
 	mov r8d, \n
-	lzcnt r9d, r8d
+	lzcnt r11d, r8d
 	mov ax, 32 + 1
-	sub ax, r9w
+	sub ax, r11w
 	mov edx, 1233; mul edx
 	shr rax, 12
 	# Now ax=#digits-1, r8=original number. Let's write the digits:
 
-	mov r9d, eax # Write #digits-1 to r9
+	mov r11d, eax # Write #digits-1 to r11
 	mov eax, r8d # Write number to eax
 
-	mov ecx, r9d # Count down the digits with ecx
+	mov ecx, r11d # Count down the digits with ecx
 	0:
 	xor edx, edx
 	mov r8, 10
@@ -103,7 +103,7 @@ syscall
 	# Decrement counter, and loop again if ecx ≥ 1
 	sub ecx, 1; jae 0b
 
-	add rdi, r9
+	add rdi, r11
 	inc rdi
 .endm
 
@@ -137,11 +137,17 @@ _start:
 	mov r12d, 0 # Store direction in r12
 	# Allocate storage for snake on stack
 	sub rsp, /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES
-	mov dword ptr [rsp], 1 # Start with single segment
-	mov dword ptr [rsp+4], 20 # x-coord of first segment
-	mov dword ptr [rsp+4+4], 10 # y-coord of first segment
+	mov dword ptr [rsp], 3 # Start with single segment
+	mov dword ptr [rsp+4], 2 # Current segment head
 
-	loop:
+	mov dword ptr [rsp+8+0*SEGMENT_BYTES], 20 # x-coord of first segment
+	mov dword ptr [rsp+8+0*SEGMENT_BYTES+4], 10 # y-coord of first segment
+	mov dword ptr [rsp+8+1*SEGMENT_BYTES], 21 # x-coord of 2nd segment
+	mov dword ptr [rsp+8+1*SEGMENT_BYTES+4], 10 # y-coord of 2nd segment
+	mov dword ptr [rsp+8+2*SEGMENT_BYTES], 22 # x-coord of 3rd segment
+	mov dword ptr [rsp+8+2*SEGMENT_BYTES+4], 10 # y-coord of 3rd segment
+
+	main_loop:
 
 	# Read from stdin
 	# sub rsp, 4 # Allocate 1 byte on stack
@@ -167,39 +173,63 @@ _start:
 	mov r12d, 3; jmp 1f
 	1:
 
+	mov r9d, [rsp+4] # Store current segment index in r9
+	# Store pos of current head in r8/r10
+	mov r8d, [rsp+8+SEGMENT_BYTES*r9]
+	mov r10d, [rsp+8+SEGMENT_BYTES*r9+4]
+
 	cmp r12d, 0; jne 0f
-	dec dword ptr [rsp+4+4]; jmp 1f
+	dec r10d; jmp 1f
 	0: cmp r12d, 1; jne 0f
-	dec dword ptr [rsp+4]; jmp 1f
+	dec r8d; jmp 1f
 	0: cmp r12d, 2; jne 0f
-	inc dword ptr [rsp+4+4]; jmp 1f
+	inc r10d; jmp 1f
 	0: cmp r12d, 3; jne 1f
-	inc dword ptr [rsp+4]; jmp 1f
+	inc r8d; jmp 1f
 	1:
+
+	# Increment current head index, wrapping if necessary
+	inc r9d
+	cmp r9d, [rsp]; jb 0f
+	xor r9d, r9d
+	0:
+	# Write current head index back to stack
+	mov [rsp+4], r9d
+
+	# Write new pos of snake head
+	mov [rsp+8+SEGMENT_BYTES*r9], r8d
+	mov [rsp+8+SEGMENT_BYTES*r9+4], r10d
 
 	write clearScreen, clearScreen.len
 	write Hello, Hello.len
 
 	# Draw all segments
-	mov r10d, [rsp+4] # Store x-coord in r10
-	mov r11d, [rsp+4+4] # Store y-coord in r11
+	draw_segment_loop:
+	inc r9d
+	cmp r9d, [rsp]; jb 0f
+	xor r9d, r9d  # If i == #segment, set i to zero
+	0:
 
-	sub rsp, 32
+	DRAW_BUF_SIZE = 32
+	sub rsp, DRAW_BUF_SIZE
 	mov rdi, rsp
 	mov byte ptr [rdi], 0x1B
 	mov byte ptr [rdi+1], '['
 	add rdi, 2
-	itoa r11d
+	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+8+SEGMENT_BYTES*r9+4])" # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
-	itoa r10d
+	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+8+SEGMENT_BYTES*r9])" # x-coord
 	mov byte ptr [rdi], 'H'
 	add rdi, 1
 	mov byte ptr [rdi], '#'
 	add rdi, 1
-	mov r8, rdi; sub r8, rsp
-	write [rsp], r8
-	add rsp, 32 # Dealloc stack
+	mov rdx, rdi; sub rdx, rsp
+	write [rsp], rdx
+	add rsp, DRAW_BUF_SIZE # Dealloc stack
+
+	# If not drawn all segments already (i==segment_head): Loop again
+	cmp r9d, [rsp+4]; jne draw_segment_loop
 
 	# Move vertically at half speed (due to character aspect ratio)
 	mov rax, MILLI_TO_NANO * 350 / 2
@@ -207,9 +237,9 @@ _start:
 	mov rax, MILLI_TO_NANO * 350
 	0:
 
-	sleep rax
+	sleep nanoseconds=rax
 
-	jmp loop
+	jmp main_loop
 
 	movq rax, SYS_exit # _exit syscall
 	movq rdi, 0 # Exit code
