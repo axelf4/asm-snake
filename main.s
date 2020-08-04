@@ -1,13 +1,8 @@
 .intel_syntax noprefix
 
 .section .rodata
-Hello: .ascii "\x1B[0010;10HHello world!\n"
-Hello.len = . - Hello
-
-hideCursor: .ascii "\033[?25l"
-hideCursor.len = . - hideCursor
-clearScreen: .ascii "\033[2J"
-clearScreen.len = . - clearScreen
+clearAndHideCursor: .ascii "\033[?25l\033[2J"
+clearAndHideCursor.len = . - clearAndHideCursor
 
 .global _start
 
@@ -132,20 +127,16 @@ _start:
 	leaq rdx, [rsp]
 	syscall
 
-	# write hideCursor, hideCursor.len
+	write clearAndHideCursor, clearAndHideCursor.len
 
 	mov r12d, 0 # Store direction in r12
 	# Allocate storage for snake on stack
 	sub rsp, /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES
-	mov dword ptr [rsp], 3 # Start with single segment
-	mov dword ptr [rsp+4], 2 # Current segment head
+	mov dword ptr [rsp], 1 # Start with single segment
+	mov dword ptr [rsp+4], 0 # Current segment head
 
-	mov dword ptr [rsp+8+0*SEGMENT_BYTES], 20 # x-coord of first segment
-	mov dword ptr [rsp+8+0*SEGMENT_BYTES+4], 10 # y-coord of first segment
-	mov dword ptr [rsp+8+1*SEGMENT_BYTES], 21 # x-coord of 2nd segment
-	mov dword ptr [rsp+8+1*SEGMENT_BYTES+4], 10 # y-coord of 2nd segment
-	mov dword ptr [rsp+8+2*SEGMENT_BYTES], 22 # x-coord of 3rd segment
-	mov dword ptr [rsp+8+2*SEGMENT_BYTES+4], 10 # y-coord of 3rd segment
+	mov dword ptr [rsp+8+0*SEGMENT_BYTES], 20 # x-coord of initial segment
+	mov dword ptr [rsp+8+0*SEGMENT_BYTES+4], 10 # y-coord of initial segment
 
 	main_loop:
 
@@ -173,11 +164,39 @@ _start:
 	mov r12d, 3; jmp 1f
 	1:
 
-	mov r9d, [rsp+4] # Store current segment index in r9
-	# Store pos of current head in r8/r10
-	mov r8d, [rsp+8+SEGMENT_BYTES*r9]
-	mov r10d, [rsp+8+SEGMENT_BYTES*r9+4]
+	mov r13d, [rsp+4] # Store old head segment index in r13
+	mov r9d, [rsp+4] # Store tail/new head segment index in r9
+	# Increment current head index, wrapping if necessary
+	inc r9d
+	cmp r9d, [rsp]; jb 0f
+	xor r9d, r9d
+	0:
+	# Write current head index back to stack
+	mov [rsp+4], r9d
 
+	# Delete char of last tail
+	DRAW_BUF_SIZE = 32
+	sub rsp, DRAW_BUF_SIZE
+	mov rdi, rsp
+	mov byte ptr [rdi], 0x1B
+	mov byte ptr [rdi+1], '['
+	add rdi, 2
+	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+8+SEGMENT_BYTES*r9+4])" # y-coord
+	mov byte ptr [rdi], '\;'
+	inc rdi
+	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+8+SEGMENT_BYTES*r9])" # x-coord
+	mov byte ptr [rdi], 'H'
+	add rdi, 1
+	mov byte ptr [rdi], ' '
+	add rdi, 1
+	mov rdx, rdi; sub rdx, rsp
+	write [rsp], rdx
+	add rsp, DRAW_BUF_SIZE # Dealloc stack
+
+	# Store pos of old head in r8/r10
+	mov r8d, [rsp+8+SEGMENT_BYTES*r13]
+	mov r10d, [rsp+8+SEGMENT_BYTES*r13+4]
+	# Compute new head position
 	cmp r12d, 0; jne 0f
 	dec r10d; jmp 1f
 	0: cmp r12d, 1; jne 0f
@@ -187,19 +206,31 @@ _start:
 	0: cmp r12d, 3; jne 1f
 	inc r8d; jmp 1f
 	1:
-
-	mov r11d, [rsp] # Store #segments in r11
-	# Increment current head index, wrapping if necessary
-	inc r9d
-	cmp r9d, [rsp]; jb 0f
-	xor r9d, r9d
-	0:
-	# Write current head index back to stack
-	mov [rsp+4], r9d
-
 	# Write new pos of snake head
 	mov [rsp+8+SEGMENT_BYTES*r9], r8d
 	mov [rsp+8+SEGMENT_BYTES*r9+4], r10d
+
+	# Check for collisions
+	mov ecx, r9d
+	check_collision_loop:
+	inc ecx
+	cmp ecx, [rsp]; jb 0f
+	xor ecx, ecx  # If i == #segment, set i to zero
+	0:
+
+	# If checked againts all other segments already (i==segment_head): Exit
+	cmp ecx, r9d; je 1f
+
+	cmp [rsp+8+SEGMENT_BYTES*rcx], r8d; jne 0f
+	cmp [rsp+8+SEGMENT_BYTES*rcx+4], r10d; jne 0f
+	# Collision!
+	jmp exit
+	0:
+
+	jmp check_collision_loop
+	1:
+
+	cmp ecx, r9d; jne check_collision_loop
 
 	APPLE_X = 25
 	APPLE_Y = 15
@@ -212,12 +243,10 @@ _start:
 	inc dword ptr [rsp] # Increment segment count
 	0:
 
-	write clearScreen, clearScreen.len
-	write Hello, Hello.len
-
 	DRAW_BUF_SIZE = 32
 	sub rsp, DRAW_BUF_SIZE
 	mov rdi, rsp
+
 	mov byte ptr [rdi], 0x1B
 	mov byte ptr [rdi+1], '['
 	add rdi, 2
@@ -229,19 +258,8 @@ _start:
 	add rdi, 1
 	mov byte ptr [rdi], 'o'
 	add rdi, 1
-	mov rdx, rdi; sub rdx, rsp
-	write [rsp], rdx
-	add rsp, DRAW_BUF_SIZE # Dealloc stack
 
-	# Draw all segments
-	draw_segment_loop:
-	inc r9d
-	cmp r9d, [rsp]; jb 0f
-	xor r9d, r9d  # If i == #segment, set i to zero
-	0:
-
-	sub rsp, DRAW_BUF_SIZE
-	mov rdi, rsp
+	# Draw new head position
 	mov byte ptr [rdi], 0x1B
 	mov byte ptr [rdi+1], '['
 	add rdi, 2
@@ -253,23 +271,21 @@ _start:
 	add rdi, 1
 	mov byte ptr [rdi], '#'
 	add rdi, 1
+
 	mov rdx, rdi; sub rdx, rsp
 	write [rsp], rdx
 	add rsp, DRAW_BUF_SIZE # Dealloc stack
 
-	# If not drawn all segments already (i==segment_head): Loop again
-	cmp r9d, [rsp+4]; jne draw_segment_loop
-
 	# Move vertically at half speed (due to character aspect ratio)
-	mov rax, MILLI_TO_NANO * 350 / 2
+	mov rax, MILLI_TO_NANO * 150
 	bt r12, 0; jc 0f
-	mov rax, MILLI_TO_NANO * 350
+	sal rax, 1
 	0:
-
 	sleep nanoseconds=rax
 
 	jmp main_loop
 
-	movq rax, SYS_exit # _exit syscall
+	exit:
+	movq rax, SYS_exit
 	movq rdi, 0 # Exit code
 	syscall
