@@ -17,6 +17,7 @@ SYS_write = 1
 SYS_ioctl = 16
 SYS_exit = 60
 SYS_nanosleep = 0x23
+SYS_getrandom = 0x13e
 
 TCGETS = 0x00005401
 TCSETS = 0x00005402
@@ -102,14 +103,38 @@ syscall
 	inc rdi
 .endm
 
+SEED_SIZE = 4
+
 NUM_SEGMENTS = 64 # The maximum number of segments
 SEGMENT_BYTES = 8
+SNAKE_OFFSET = TERMIOS_SIZE + SEED_SIZE
+APPLE_DATA_SIZE = 8
+APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
+
+# Generates a random number.
+#
+# Output in eax. Clobbers rcx.
+.macro rand
+	mov eax, [rsp+TERMIOS_SIZE] # Store current seed in rax
+	mov ecx, 0x8088405; mul ecx; inc eax
+	mov [rsp+TERMIOS_SIZE], eax
+	inc eax; and eax, 0x1F # Put in range [1, 31]
+.endm
+
+.macro rand_apple_pos
+	rand
+	mov [rsp+APPLE_OFFSET], eax
+	rand
+	mov [rsp+APPLE_OFFSET+4], eax
+.endm
 
 .text
 _start:
+	# Allocate space on stack
+	sub rsp, TERMIOS_SIZE + SEED_SIZE + /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES + APPLE_DATA_SIZE
+
 	# set_stdin_nonblock
 	# Setup terminal
-	sub rsp, TERMIOS_SIZE
 	movq rax, SYS_ioctl
 	movq rdi, STDIN
 	movq rsi, TCGETS
@@ -127,16 +152,23 @@ _start:
 	leaq rdx, [rsp]
 	syscall
 
+	# Get RNG seed
+	mov rax, SYS_getrandom
+	lea rdi, [rsp+TERMIOS_SIZE]
+	mov rsi, SEED_SIZE
+	mov rdx, 0 # No flags
+	syscall
+
+	rand_apple_pos # Generate initial apple position
+
 	write clearAndHideCursor, clearAndHideCursor.len
 
 	mov r12d, 0 # Store direction in r12
-	# Allocate storage for snake on stack
-	sub rsp, /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES
-	mov dword ptr [rsp], 1 # Start with single segment
-	mov dword ptr [rsp+4], 0 # Current segment head
+	mov dword ptr [rsp+SNAKE_OFFSET], 1 # Start with single segment
+	mov dword ptr [rsp+SNAKE_OFFSET+4], 0 # Current segment head
 
-	mov dword ptr [rsp+8+0*SEGMENT_BYTES], 20 # x-coord of initial segment
-	mov dword ptr [rsp+8+0*SEGMENT_BYTES+4], 10 # y-coord of initial segment
+	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES], 20 # x-coord of initial segment
+	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES+4], 10 # y-coord of initial segment
 
 	main_loop:
 
@@ -164,15 +196,16 @@ _start:
 	mov r12d, 3; jmp 1f
 	1:
 
-	mov r13d, [rsp+4] # Store old head segment index in r13
-	mov r9d, [rsp+4] # Store tail/new head segment index in r9
+	mov r14d, [rsp+SNAKE_OFFSET] # Store current num segments in r14
+	mov r13d, [rsp+SNAKE_OFFSET+4] # Store old head segment index in r13
+	mov r9d, [rsp+SNAKE_OFFSET+4] # Store tail/new head segment index in r9
 	# Increment current head index, wrapping if necessary
 	inc r9d
-	cmp r9d, [rsp]; jb 0f
+	cmp r9d, [rsp+SNAKE_OFFSET]; jb 0f
 	xor r9d, r9d
 	0:
 	# Write current head index back to stack
-	mov [rsp+4], r9d
+	mov [rsp+SNAKE_OFFSET+4], r9d
 
 	# Delete char of last tail
 	DRAW_BUF_SIZE = 32
@@ -181,10 +214,10 @@ _start:
 	mov byte ptr [rdi], 0x1B
 	mov byte ptr [rdi+1], '['
 	add rdi, 2
-	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+8+SEGMENT_BYTES*r9+4])" # y-coord
+	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
-	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+8+SEGMENT_BYTES*r9])" # x-coord
+	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
 	mov byte ptr [rdi], 'H'
 	add rdi, 1
 	mov byte ptr [rdi], ' '
@@ -194,8 +227,8 @@ _start:
 	add rsp, DRAW_BUF_SIZE # Dealloc stack
 
 	# Store pos of old head in r8/r10
-	mov r8d, [rsp+8+SEGMENT_BYTES*r13]
-	mov r10d, [rsp+8+SEGMENT_BYTES*r13+4]
+	mov r8d, [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r13]
+	mov r10d, [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r13+4]
 	# Compute new head position
 	cmp r12d, 0; jne 0f
 	dec r10d; jmp 1f
@@ -207,22 +240,26 @@ _start:
 	inc r8d; jmp 1f
 	1:
 	# Write new pos of snake head
-	mov [rsp+8+SEGMENT_BYTES*r9], r8d
-	mov [rsp+8+SEGMENT_BYTES*r9+4], r10d
+	mov [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9], r8d
+	mov [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4], r10d
+
+	# Check for collision against boundaries
+	test r8d, r8d; jz exit
+	test r10d, r10d; jz exit
 
 	# Check for collisions
 	mov ecx, r9d
 	check_collision_loop:
 	inc ecx
-	cmp ecx, [rsp]; jb 0f
+	cmp ecx, [rsp+SNAKE_OFFSET]; jb 0f
 	xor ecx, ecx  # If i == #segment, set i to zero
 	0:
 
 	# If checked againts all other segments already (i==segment_head): Exit
 	cmp ecx, r9d; je 1f
 
-	cmp [rsp+8+SEGMENT_BYTES*rcx], r8d; jne 0f
-	cmp [rsp+8+SEGMENT_BYTES*rcx+4], r10d; jne 0f
+	cmp [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*rcx], r8d; jne 0f
+	cmp [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*rcx+4], r10d; jne 0f
 	# Collision!
 	jmp exit
 	0:
@@ -232,15 +269,15 @@ _start:
 
 	cmp ecx, r9d; jne check_collision_loop
 
-	APPLE_X = 25
-	APPLE_Y = 15
-
-	cmp r8d, APPLE_X; jne 0f
-	cmp r10d, APPLE_Y; jne 0f
-	# Ate apple
-	mov dword ptr [rsp+8+SEGMENT_BYTES*r11], APPLE_X
-	mov dword ptr [rsp+8+SEGMENT_BYTES*r11+4], APPLE_Y
-	inc dword ptr [rsp] # Increment segment count
+	cmp r8d, [rsp+APPLE_OFFSET]; jne 0f
+	cmp r10d, [rsp+APPLE_OFFSET+4]; jne 0f
+	# Ate apple: Write position of next segment
+	rand_apple_pos
+	mov r8d, [rsp+APPLE_OFFSET]
+	mov [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14], r8d
+	mov r10d, [rsp+APPLE_OFFSET+4]
+	mov [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14+4], r10d
+	inc dword ptr [rsp+SNAKE_OFFSET] # Increment segment count
 	0:
 
 	DRAW_BUF_SIZE = 32
@@ -250,10 +287,10 @@ _start:
 	mov byte ptr [rdi], 0x1B
 	mov byte ptr [rdi+1], '['
 	add rdi, 2
-	itoa APPLE_Y # y-coord
+	itoa [rsp+DRAW_BUF_SIZE+APPLE_OFFSET+4] # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
-	itoa APPLE_X # x-coord
+	itoa [rsp+DRAW_BUF_SIZE+APPLE_OFFSET] # x-coord
 	mov byte ptr [rdi], 'H'
 	add rdi, 1
 	mov byte ptr [rdi], 'o'
@@ -263,10 +300,10 @@ _start:
 	mov byte ptr [rdi], 0x1B
 	mov byte ptr [rdi+1], '['
 	add rdi, 2
-	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+8+SEGMENT_BYTES*r9+4])" # y-coord
+	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
-	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+8+SEGMENT_BYTES*r9])" # x-coord
+	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
 	mov byte ptr [rdi], 'H'
 	add rdi, 1
 	mov byte ptr [rdi], '#'
