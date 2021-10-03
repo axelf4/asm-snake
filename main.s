@@ -74,30 +74,29 @@ syscall
 
 # Clobbers: rax, rcx, rdx, r8, r11
 # Note: n has to be positive
-.macro itoa n=3
+.macro itoa n=0
 	# First count the number of digits
 	mov r8d, \n
-	lzcnt r11d, r8d
+	lzcnt edx, r8d
 	mov ax, 32 + 1
-	sub ax, r11w
+	sub ax, dx
 	mov edx, 1233; mul edx
 	shr rax, 12
-	# Now ax=#digits-1, r8=original number. Let's write the digits:
+	# Now ax=#digits-1, r8=original number. Proceed to write digits:
 
 	mov r11d, eax # Write #digits-1 to r11
 	mov eax, r8d # Write number to eax
 
 	mov ecx, r11d # Count down the digits with ecx
 	0:
-	xor edx, edx
-	mov r8, 10
-	div r8d # TODO Optimize away slow div
-	# Quotient is stored in eax, and remainder in edx
+	mov edx, eax
+	mov r8d, 0xCCCCCCCD; imul rax, r8; shr rax, 35 # Div10
+	lea r8d, [rax + rax * 4 - '0'/2] ; add r8d, r8d # Set r8d to 10*eax - '0'
+	sub edx, r8d # Calc remainder
+	# Quotient is stored in eax, and digit in edx
 
-	add dl, '0'
 	mov byte ptr [rdi+rcx], dl
-	# Decrement counter, and loop again if ecx ≥ 1
-	sub ecx, 1; jae 0b
+	sub ecx, 1; jae 0b # Decrement counter, and loop again if ecx≥1
 
 	add rdi, r11
 	inc rdi
@@ -118,7 +117,7 @@ APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
 	mov eax, [rsp+TERMIOS_SIZE] # Store current seed in rax
 	mov ecx, 0x8088405; mul ecx; inc eax
 	mov [rsp+TERMIOS_SIZE], eax
-	inc eax; and eax, 0x1F # Put in range [1, 31]
+	inc eax; and eax, 0xF # Put in range [1, 15]
 .endm
 
 .macro rand_apple_pos
@@ -173,8 +172,7 @@ _start:
 	main_loop:
 
 	# Read from stdin
-	# sub rsp, 4 # Allocate 1 byte on stack
-	push 0
+	push 0 # Allocate 1 byte on stack
 	read_loop: # Loop while still has type-ahead
 	mov eax, SYS_read # Use the read syscall
 	mov edi, STDIN # Read from stdin
@@ -198,7 +196,7 @@ _start:
 
 	mov r14d, [rsp+SNAKE_OFFSET] # Store current num segments in r14
 	mov r13d, [rsp+SNAKE_OFFSET+4] # Store old head segment index in r13
-	mov r9d, [rsp+SNAKE_OFFSET+4] # Store tail/new head segment index in r9
+	mov r9d, r13d # Store tail/new head segment index in r9
 	# Increment current head index, wrapping if necessary
 	inc r9d
 	cmp r9d, [rsp+SNAKE_OFFSET]; jb 0f
@@ -246,7 +244,6 @@ _start:
 	# Check for collision against boundaries
 	test r8d, r8d; jz exit
 	test r10d, r10d; jz exit
-
 	# Check for collisions
 	mov ecx, r9d
 	check_collision_loop:
