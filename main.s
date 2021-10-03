@@ -98,8 +98,7 @@ syscall
 	mov byte ptr [rdi+rcx], dl
 	sub ecx, 1; jae 0b # Decrement counter, and loop again if ecx≥1
 
-	add rdi, r11
-	inc rdi
+	add rdi, r11; inc rdi
 .endm
 
 SEED_SIZE = 4
@@ -117,7 +116,7 @@ APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
 	mov eax, [rsp+TERMIOS_SIZE] # Store current seed in rax
 	mov ecx, 0x8088405; mul ecx; inc eax
 	mov [rsp+TERMIOS_SIZE], eax
-	inc eax; and eax, 0xF # Put in range [1, 15]
+	and eax, 0xF; inc eax # Put in range [1, 16]
 .endm
 
 .macro rand_apple_pos
@@ -134,10 +133,10 @@ _start:
 
 	# set_stdin_nonblock
 	# Setup terminal
-	movq rax, SYS_ioctl
-	movq rdi, STDIN
-	movq rsi, TCGETS
-	leaq rdx, [rsp]
+	mov rax, SYS_ioctl
+	mov rdi, STDIN
+	mov rsi, TCGETS
+	lea rdx, [rsp]
 	syscall
 
 	and dword ptr [rsp+12], ~(ICANON | ECHO) # Set local modes
@@ -145,10 +144,10 @@ _start:
 	mov byte ptr [rsp+17+VTIME], 0
 
 	# Write new terminal settings
-	movq rax, SYS_ioctl
-	movq rdi, STDIN
-	movq rsi, TCSETS
-	leaq rdx, [rsp]
+	mov rax, SYS_ioctl
+	mov rdi, STDIN
+	mov rsi, TCSETS
+	lea rdx, [rsp]
 	syscall
 
 	# Get RNG seed
@@ -184,6 +183,7 @@ _start:
 	jne read_loop
 	pop rax
 
+	# TODO do not allow turning 180 degrees
 	cmp rax, 'w'; jne 0f
 	mov r12d, 0; jmp 1f
 	0: cmp rax, 'a'; jne 0f
@@ -209,17 +209,14 @@ _start:
 	DRAW_BUF_SIZE = 32
 	sub rsp, DRAW_BUF_SIZE
 	mov rdi, rsp
-	mov byte ptr [rdi], 0x1B
-	mov byte ptr [rdi+1], '['
+	mov word ptr [rdi], 0x1B | '[' << 8
 	add rdi, 2
 	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
 	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
-	mov byte ptr [rdi], 'H'
-	add rdi, 1
-	mov byte ptr [rdi], ' '
-	add rdi, 1
+	mov word ptr [rdi], 'H' | ' ' << 8
+	add rdi, 2
 	mov rdx, rdi; sub rdx, rsp
 	write [rsp], rdx
 	add rsp, DRAW_BUF_SIZE # Dealloc stack
@@ -281,30 +278,24 @@ _start:
 	sub rsp, DRAW_BUF_SIZE
 	mov rdi, rsp
 
-	mov byte ptr [rdi], 0x1B
-	mov byte ptr [rdi+1], '['
+	mov word ptr [rdi], 0x1B | '[' << 8
 	add rdi, 2
 	itoa [rsp+DRAW_BUF_SIZE+APPLE_OFFSET+4] # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
 	itoa [rsp+DRAW_BUF_SIZE+APPLE_OFFSET] # x-coord
-	mov byte ptr [rdi], 'H'
-	add rdi, 1
-	mov byte ptr [rdi], 'o'
-	add rdi, 1
+	mov word ptr [rdi], 'H' | 'o' << 8
+	add rdi, 2
 
 	# Draw new head position
-	mov byte ptr [rdi], 0x1B
-	mov byte ptr [rdi+1], '['
+	mov word ptr [rdi], 0x1B | '[' << 8
 	add rdi, 2
 	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
 	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
-	mov byte ptr [rdi], 'H'
-	add rdi, 1
-	mov byte ptr [rdi], '#'
-	add rdi, 1
+	mov word ptr [rdi], 'H' | '#' << 8
+	add rdi, 2
 
 	mov rdx, rdi; sub rdx, rsp
 	write [rsp], rdx
@@ -320,6 +311,6 @@ _start:
 	jmp main_loop
 
 	exit:
-	movq rax, SYS_exit
-	movq rdi, 0 # Exit code
+	mov rax, SYS_exit
+	mov rdi, 0 # Exit code
 	syscall
