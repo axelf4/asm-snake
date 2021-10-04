@@ -3,6 +3,8 @@
 .section .rodata
 clearAndHideCursor: .ascii "\033[?25l\033[2J"
 clearAndHideCursor.len = . - clearAndHideCursor
+showCursor: .ascii "\033[?25h"
+showCursor.len = . - showCursor
 
 .global _start
 
@@ -102,10 +104,11 @@ syscall
 .endm
 
 SEED_SIZE = 4
+DRAW_BUF_SIZE = 32
 
 NUM_SEGMENTS = 64 # The maximum number of segments
 SEGMENT_BYTES = 8
-SNAKE_OFFSET = TERMIOS_SIZE + SEED_SIZE
+SNAKE_OFFSET = TERMIOS_SIZE + SEED_SIZE + DRAW_BUF_SIZE
 APPLE_DATA_SIZE = 8
 APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
 
@@ -129,7 +132,7 @@ APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
 .text
 _start:
 	# Allocate space on stack
-	sub rsp, TERMIOS_SIZE + SEED_SIZE + /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES + APPLE_DATA_SIZE
+	sub rsp, TERMIOS_SIZE + SEED_SIZE + DRAW_BUF_SIZE + /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES + APPLE_DATA_SIZE
 
 	# set_stdin_nonblock
 	# Setup terminal
@@ -139,22 +142,34 @@ _start:
 	lea rdx, [rsp]
 	syscall
 
-	and dword ptr [rsp+12], ~(ICANON | ECHO) # Set local modes
-	mov byte ptr [rsp+17+VMIN], 0
-	mov byte ptr [rsp+17+VTIME], 0
+	# Make copy of termios struct
+	mov rax, [rsp+48]
+	movdqu xmm0, [rsp]
+	movdqu xmm1, [rsp+16]
+	movdqu xmm2, [rsp+32]
+	mov [rsp+TERMIOS_SIZE+48], rax
+	mov eax, [rsp+56]
+	movups [rsp+TERMIOS_SIZE], xmm0
+	movups [rsp+TERMIOS_SIZE+16], xmm1
+	movups [rsp+TERMIOS_SIZE+32], xmm2
+	mov [rsp+56], eax
+
+	and dword ptr [rsp+TERMIOS_SIZE+12], ~(ICANON | ECHO) # Set local modes
+	mov byte ptr [rsp+TERMIOS_SIZE+17+VMIN], 0
+	mov byte ptr [rsp+TERMIOS_SIZE+17+VTIME], 0
 
 	# Write new terminal settings
 	mov rax, SYS_ioctl
 	mov rdi, STDIN
 	mov rsi, TCSETS
-	lea rdx, [rsp]
+	lea rdx, [rsp+TERMIOS_SIZE]
 	syscall
 
 	# Get RNG seed
 	mov rax, SYS_getrandom
 	lea rdi, [rsp+TERMIOS_SIZE]
 	mov rsi, SEED_SIZE
-	mov rdx, 0 # No flags
+	xor edx, edx # No flags
 	syscall
 
 	rand_apple_pos # Generate initial apple position
@@ -169,19 +184,17 @@ _start:
 	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES+4], 10 # y-coord of initial segment
 
 	main_loop:
-
 	# Read from stdin
-	push 0 # Allocate 1 byte on stack
 	read_loop: # Loop while still has type-ahead
 	mov eax, SYS_read # Use the read syscall
 	mov edi, STDIN # Read from stdin
-	mov rsi, rsp # Read to stack
+	lea rsi, [rsp-1] # Read to stack
 	mov rdx, 1 # Read single byte
 	syscall
 	# If actually read a byte: Repeat
-	cmp eax, 0 # Cmp return value of read()
-	jne read_loop
-	pop rax
+	test eax, eax # Cmp return value of read()
+	jnz read_loop
+	mov al, [rsp-1]
 
 	# TODO do not allow turning 180 degrees
 	cmp rax, 'w'; jne 0f
@@ -206,20 +219,15 @@ _start:
 	mov [rsp+SNAKE_OFFSET+4], r9d
 
 	# Delete char of last tail
-	DRAW_BUF_SIZE = 32
-	sub rsp, DRAW_BUF_SIZE
-	mov rdi, rsp
+	lea rdi, [rsp+TERMIOS_SIZE+SEED_SIZE]
 	mov word ptr [rdi], 0x1B | '[' << 8
 	add rdi, 2
-	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
+	itoa "(dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
-	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
+	itoa "(dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
 	mov word ptr [rdi], 'H' | ' ' << 8
 	add rdi, 2
-	mov rdx, rdi; sub rdx, rsp
-	write [rsp], rdx
-	add rsp, DRAW_BUF_SIZE # Dealloc stack
 
 	# Store pos of old head in r8/r10
 	mov r8d, [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r13]
@@ -248,58 +256,49 @@ _start:
 	cmp ecx, [rsp+SNAKE_OFFSET]; jb 0f
 	xor ecx, ecx  # If i == #segment, set i to zero
 	0:
-
 	# If checked againts all other segments already (i==segment_head): Exit
 	cmp ecx, r9d; je 1f
 
 	cmp [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*rcx], r8d; jne 0f
 	cmp [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*rcx+4], r10d; jne 0f
-	# Collision!
-	jmp exit
+	jmp exit # Collision!
 	0:
-
 	jmp check_collision_loop
 	1:
-
-	cmp ecx, r9d; jne check_collision_loop
 
 	cmp r8d, [rsp+APPLE_OFFSET]; jne 0f
 	cmp r10d, [rsp+APPLE_OFFSET+4]; jne 0f
 	# Ate apple: Write position of next segment
 	rand_apple_pos
-	mov r8d, [rsp+APPLE_OFFSET]
-	mov [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14], r8d
-	mov r10d, [rsp+APPLE_OFFSET+4]
-	mov [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14+4], r10d
+	# "Old" cell of new segment will be cleared: Set it outside of screen
+	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14], 32
+	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14+4], 32
 	inc dword ptr [rsp+SNAKE_OFFSET] # Increment segment count
 	0:
 
-	DRAW_BUF_SIZE = 32
-	sub rsp, DRAW_BUF_SIZE
-	mov rdi, rsp
-
 	mov word ptr [rdi], 0x1B | '[' << 8
 	add rdi, 2
-	itoa [rsp+DRAW_BUF_SIZE+APPLE_OFFSET+4] # y-coord
+	itoa [rsp+APPLE_OFFSET+4] # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
-	itoa [rsp+DRAW_BUF_SIZE+APPLE_OFFSET] # x-coord
+	itoa [rsp+APPLE_OFFSET] # x-coord
 	mov word ptr [rdi], 'H' | 'o' << 8
 	add rdi, 2
 
 	# Draw new head position
 	mov word ptr [rdi], 0x1B | '[' << 8
 	add rdi, 2
-	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
+	itoa "(dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
-	itoa "(dword ptr [rsp+DRAW_BUF_SIZE+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
+	itoa "(dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
 	mov word ptr [rdi], 'H' | '#' << 8
 	add rdi, 2
 
-	mov rdx, rdi; sub rdx, rsp
-	write [rsp], rdx
-	add rsp, DRAW_BUF_SIZE # Dealloc stack
+	# mov rdx, rdi; sub rdx, rsp; sub rdx, TERMIOS_SIZE+SEED_SIZE
+	lea rdx, [rdi-TERMIOS_SIZE-SEED_SIZE]; sub rdx, rsp
+	write [rsp+TERMIOS_SIZE+SEED_SIZE], rdx
+	# add rsp, DRAW_BUF_SIZE # Dealloc stack
 
 	# Move vertically at half speed (due to character aspect ratio)
 	mov rax, MILLI_TO_NANO * 150
@@ -311,6 +310,14 @@ _start:
 	jmp main_loop
 
 	exit:
+	write showCursor, showCursor.len
+	# Restore previous terminal settings
+	mov rax, SYS_ioctl
+	mov rdi, STDIN
+	mov rsi, TCSETS
+	lea rdx, [rsp]
+	syscall
+
 	mov rax, SYS_exit
 	mov rdi, 0 # Exit code
 	syscall
