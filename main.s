@@ -340,12 +340,10 @@ _start:
 	write [rsp+TERMIOS_SIZE+SEED_SIZE], rdx # Flush draw buffer
 
 	# Move vertically at half speed (due to character aspect ratio)
-	mov rax, MILLI_TO_NANO * 150
-	bt r12, 0; jc 0f
-	sal rax, 1
-	0:
+	bt r12d, 0; sbb eax, eax # Make eax all 1/0:s depending on dir
+	and eax, -MILLI_TO_NANO*300/2
+	add eax, MILLI_TO_NANO*300
 	sleep nanoseconds=rax
-
 	jmp main_loop
 
 	exit:
