@@ -1,12 +1,42 @@
 .intel_syntax noprefix
 
-.section .rodata
-clearAndHideCursor: .ascii "\033[?25l\033[2J"
-clearAndHideCursor.len = . - clearAndHideCursor
-showCursor: .ascii "\033[?25h"
-showCursor.len = . - showCursor
+WIDTH = 32
+HEIGHT = 16
+INITIAL_X = 20
+INITIAL_Y = 10
 
-.global _start
+.macro const_itoa n
+	.if \n / 10
+	const_itoa "(\n / 10)"
+	.endif
+	.byte '0' + \n % 10
+.endm
+
+.section .rodata
+clearAndHideCursor:
+	.ascii "\033[?25l\033[2J\033[;H╔Score: "
+	.rept WIDTH-7
+	.ascii "═" 
+	.endr
+	.ascii "╗"
+	.rept HEIGHT
+	.ascii "\033[B\033[D║"
+	.endr
+	.ascii "\033[2;H"
+	.rept HEIGHT
+	.ascii "║\n"
+	.endr
+	.ascii "╚"
+	.rept WIDTH
+	.ascii "═"
+	.endr
+	.ascii "╝"
+clearAndHideCursor.len = . - clearAndHideCursor
+showCursor:
+	.ascii "\033["
+	const_itoa (HEIGHT+2)
+	.ascii ";2HGame over!\n\033[?25h"
+showCursor.len = . - showCursor
 
 F_SETFL = 4 /* Set file status flags. */
 O_RDONLY = 00
@@ -76,7 +106,7 @@ syscall
 
 # Clobbers: rax, rcx, rdx, r8, r11
 # Note: n has to be positive
-.macro itoa n=0
+.macro itoa n=0 l=0
 	# First count the number of digits
 	mov r8d, \n
 	lzcnt edx, r8d
@@ -90,7 +120,7 @@ syscall
 	mov eax, r8d # Write number to eax
 
 	mov ecx, r11d # Count down the digits with ecx
-	0:
+	\l :
 	mov edx, eax
 	mov r8d, 0xCCCCCCCD; imul rax, r8; shr rax, 35 # Div10
 	lea r8d, [rax + rax * 4 - '0'/2] ; add r8d, r8d # Set r8d to 10*eax - '0'
@@ -98,15 +128,15 @@ syscall
 	# Quotient is stored in eax, and digit in edx
 
 	mov byte ptr [rdi+rcx], dl
-	sub ecx, 1; jae 0b # Decrement counter, and loop again if ecx≥1
+	sub ecx, 1; jae \l\()b # Decrement counter, and loop again if ecx≥1
 
 	add rdi, r11; inc rdi
 .endm
 
 SEED_SIZE = 4
-DRAW_BUF_SIZE = 32
+DRAW_BUF_SIZE = 48
 
-NUM_SEGMENTS = 64 # The maximum number of segments
+NUM_SEGMENTS = 128 # The maximum number of segments
 SEGMENT_BYTES = 8
 SNAKE_OFFSET = TERMIOS_SIZE + SEED_SIZE + DRAW_BUF_SIZE
 APPLE_DATA_SIZE = 8
@@ -115,20 +145,21 @@ APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
 # Generates a random number.
 #
 # Output in eax. Clobbers rcx.
-.macro rand
+.macro rand min=1 mask=0xF
 	mov eax, [rsp+TERMIOS_SIZE] # Store current seed in rax
 	mov ecx, 0x8088405; mul ecx; inc eax
 	mov [rsp+TERMIOS_SIZE], eax
-	and eax, 0xF; inc eax # Put in range [1, 16]
+	and eax, \mask; add eax, \min # Put in range min+[0,mask]
 .endm
 
 .macro rand_apple_pos
-	rand
+	rand 2,0x1F
 	mov [rsp+APPLE_OFFSET], eax
-	rand
+	rand 2,0xF
 	mov [rsp+APPLE_OFFSET+4], eax
 .endm
 
+.global _start
 .text
 _start:
 	# Allocate space on stack
@@ -165,6 +196,8 @@ _start:
 	lea rdx, [rsp+TERMIOS_SIZE]
 	syscall
 
+	write clearAndHideCursor, clearAndHideCursor.len
+
 	# Get RNG seed
 	mov rax, SYS_getrandom
 	lea rdi, [rsp+TERMIOS_SIZE]
@@ -172,16 +205,16 @@ _start:
 	xor edx, edx # No flags
 	syscall
 
-	rand_apple_pos # Generate initial apple position
-
-	write clearAndHideCursor, clearAndHideCursor.len
-
 	mov r12d, 0 # Store direction in r12
 	mov dword ptr [rsp+SNAKE_OFFSET], 1 # Start with single segment
 	mov dword ptr [rsp+SNAKE_OFFSET+4], 0 # Current segment head
 
-	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES], 20 # x-coord of initial segment
-	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES+4], 10 # y-coord of initial segment
+	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES], INITIAL_X # x-coord of initial segment
+	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES+4], INITIAL_Y # y-coord of initial segment
+	# Place initial apple in front of snake to only have to randomize
+	# apple positions below.
+	mov dword ptr [rsp+APPLE_OFFSET], INITIAL_X
+	mov dword ptr [rsp+APPLE_OFFSET+4], INITIAL_Y-1
 
 	main_loop:
 	# Read from stdin
@@ -196,14 +229,13 @@ _start:
 	jnz read_loop
 	mov al, [rsp-1]
 
-	# TODO do not allow turning 180 degrees
-	cmp rax, 'w'; jne 0f
+	cmp rax, 'w'; jne 0f; cmp r12d, 2; je 1f
 	mov r12d, 0; jmp 1f
-	0: cmp rax, 'a'; jne 0f
+	0: cmp rax, 'a'; jne 0f; cmp r12d, 3; je 1f
 	mov r12d, 1; jmp 1f
-	0: cmp rax, 's'; jne 0f
+	0: cmp rax, 's'; jne 0f; cmp r12d, 0; je 1f
 	mov r12d, 2; jmp 1f
-	0: cmp rax, 'd'; jne 1f
+	0: cmp rax, 'd'; jne 1f; cmp r12d, 1; je 1f
 	mov r12d, 3; jmp 1f
 	1:
 
@@ -247,8 +279,10 @@ _start:
 	mov [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4], r10d
 
 	# Check for collision against boundaries
-	test r8d, r8d; jz exit
-	test r10d, r10d; jz exit
+	cmp r8d, 2; jb exit
+	cmp r10d, 2; jb exit
+	cmp r8d, WIDTH+1; ja exit
+	cmp r10d, HEIGHT+1; ja exit
 	# Check for collisions
 	mov ecx, r9d
 	check_collision_loop:
@@ -273,6 +307,13 @@ _start:
 	# "Old" cell of new segment will be cleared: Set it outside of screen
 	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14], 32
 	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14+4], 32
+
+	# Write new score
+	mov dword ptr [rdi], 0x1B | '[' << 8 | '\;' << 16 | '9' << 24
+	mov byte ptr [rdi+4], 'H'
+	add rdi, 5
+	itoa [rsp+SNAKE_OFFSET], l=1
+
 	inc dword ptr [rsp+SNAKE_OFFSET] # Increment segment count
 	0:
 
@@ -295,10 +336,8 @@ _start:
 	mov word ptr [rdi], 'H' | '#' << 8
 	add rdi, 2
 
-	# mov rdx, rdi; sub rdx, rsp; sub rdx, TERMIOS_SIZE+SEED_SIZE
 	lea rdx, [rdi-TERMIOS_SIZE-SEED_SIZE]; sub rdx, rsp
-	write [rsp+TERMIOS_SIZE+SEED_SIZE], rdx
-	# add rsp, DRAW_BUF_SIZE # Dealloc stack
+	write [rsp+TERMIOS_SIZE+SEED_SIZE], rdx # Flush draw buffer
 
 	# Move vertically at half speed (due to character aspect ratio)
 	mov rax, MILLI_TO_NANO * 150
