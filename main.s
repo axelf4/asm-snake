@@ -132,19 +132,18 @@ APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
 
 # Generates a random number.
 #
-# Output in eax. Clobbers rcx.
-.macro rand min=1 mask=0xF
+# Output in ax. Clobbers cx.
+.macro rand
 	mov eax, [rsp+TERMIOS_SIZE] # Store current seed in rax
 	mov ecx, 0x8088405; mul ecx; inc eax
 	mov [rsp+TERMIOS_SIZE], eax
-	and eax, \mask; add eax, \min # Put in range min+[0,mask]
 .endm
 
 .macro rand_apple_pos
-	rand 2, 0x1F
-	mov [rsp+APPLE_OFFSET], eax
-	rand 2, 0xF
-	mov [rsp+APPLE_OFFSET+4], eax
+	rand
+	and eax, 0x0F001F; add eax, 2 | 2 << 16 # Put in ranges
+	mov [rsp+APPLE_OFFSET], ax
+	shr eax, 16; mov [rsp+APPLE_OFFSET+4], eax
 .endm
 
 .global _start
