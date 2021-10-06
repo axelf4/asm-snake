@@ -96,41 +96,29 @@ MILLI_TO_NANO = 1000000
 	add rsp, 2 * 8 # Pop two qwords from stack
 .endm
 
-.macro set_stdin_nonblock
-mov eax, 72 # Use the fcntl syscall
-mov rdi, STDIN
-mov rsi, F_SETFL
-mov rdx, O_RDONLY | O_NONBLOCK
-syscall
-.endm
-
 # Clobbers: rax, rcx, rdx, r8, r11
 # Note: n has to be positive
 .macro itoa n=0 l=0
 	# First count the number of digits
-	mov r8d, \n
-	lzcnt edx, r8d
-	mov ax, 32 + 1
-	sub ax, dx
+	mov ecx, \n
+	lzcnt edx, ecx
+	mov eax, 32 + 1; sub eax, edx
 	mov edx, 1233; mul edx
-	shr rax, 12
-	# Now ax=#digits-1, r8=original number. Proceed to write digits:
+	shr eax, 12; inc eax
 
-	mov r11d, eax # Write #digits-1 to r11
-	mov eax, r8d # Write number to eax
-
-	mov ecx, r11d # Count down the digits with ecx
+	xchg eax, ecx # Write n to ax and count down digits with cx
+	mov r11d, ecx # Store #digits in r11
 	\l :
 	mov edx, eax
 	mov r8d, 0xCCCCCCCD; imul rax, r8; shr rax, 35 # Div10
-	lea r8d, [rax + rax * 4 - '0'/2] ; add r8d, r8d # Set r8d to 10*eax - '0'
+	lea r8d, [rax+rax*4-'0'/2] ; add r8d, r8d # Set r8d to 10*eax - '0'
 	sub edx, r8d # Calc remainder
 	# Quotient is stored in eax, and digit in edx
 
-	mov byte ptr [rdi+rcx], dl
-	sub ecx, 1; jae \l\()b # Decrement counter, and loop again if ecx≥1
+	mov byte ptr [rdi+rcx-1], dl
+	dec ecx; jnz \l\()b
 
-	add rdi, r11; inc rdi
+	add rdi, r11
 .endm
 
 SEED_SIZE = 4
@@ -165,7 +153,6 @@ _start:
 	# Allocate space on stack
 	sub rsp, TERMIOS_SIZE + SEED_SIZE + DRAW_BUF_SIZE + /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES + APPLE_DATA_SIZE
 
-	# set_stdin_nonblock
 	# Setup terminal
 	mov rax, SYS_ioctl
 	mov rdi, STDIN
