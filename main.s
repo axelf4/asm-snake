@@ -96,7 +96,7 @@ MILLI_TO_NANO = 1000000
 	add rsp, 2 * 8 # Pop two qwords from stack
 .endm
 
-# Clobbers: rax, rcx, rdx, r8, r11
+# Clobbers: ax, cx, dx, si, r11
 # Note: n has to be positive
 .macro itoa n=0 l=0
 	# First count the number of digits
@@ -110,9 +110,9 @@ MILLI_TO_NANO = 1000000
 	mov r11d, ecx # Store #digits in r11
 	\l :
 	mov edx, eax
-	mov r8d, 0xCCCCCCCD; imul rax, r8; shr rax, 35 # Div10
-	lea r8d, [rax+rax*4-'0'/2] ; add r8d, r8d # Set r8d to 10*eax - '0'
-	sub edx, r8d # Calc remainder
+	mov esi, 0xCCCCCCCD; imul rax, rsi; shr rax, 35 # Div10
+	lea esi, [rax+rax*4-'0'/2] ; add esi, esi # Set esi to 10*eax - '0'
+	sub edx, esi # Calc remainder
 	# Quotient is stored in eax, and digit in edx
 
 	mov byte ptr [rdi+rcx-1], dl
@@ -141,9 +141,9 @@ APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
 .endm
 
 .macro rand_apple_pos
-	rand 2,0x1F
+	rand 2, 0x1F
 	mov [rsp+APPLE_OFFSET], eax
-	rand 2,0xF
+	rand 2, 0xF
 	mov [rsp+APPLE_OFFSET+4], eax
 .endm
 
@@ -192,9 +192,8 @@ _start:
 	xor edx, edx # No flags
 	syscall
 
-	mov r12d, 0 # Store direction in r12
-	mov dword ptr [rsp+SNAKE_OFFSET], 1 # Start with single segment
-	mov dword ptr [rsp+SNAKE_OFFSET+4], 0 # Current segment head
+	xor r12d, r12d # Store direction in r12
+	mov qword ptr [rsp+SNAKE_OFFSET], 1 # Start with single segment and write current head
 
 	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES], INITIAL_X # x-coord of initial segment
 	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES+4], INITIAL_Y # y-coord of initial segment
@@ -206,8 +205,8 @@ _start:
 	main_loop:
 	# Read from stdin
 	read_loop: # Loop while still has type-ahead
-	mov eax, SYS_read # Use the read syscall
-	mov edi, STDIN # Read from stdin
+	mov rax, SYS_read # Use the read syscall
+	mov rdi, STDIN # Read from stdin
 	lea rsi, [rsp-1] # Read to stack
 	mov rdx, 1 # Read single byte
 	syscall
@@ -227,15 +226,16 @@ _start:
 	1:
 
 	mov r14d, [rsp+SNAKE_OFFSET] # Store current num segments in r14
-	mov r13d, [rsp+SNAKE_OFFSET+4] # Store old head segment index in r13
-	mov r9d, r13d # Store tail/new head segment index in r9
+	mov r9d, [rsp+SNAKE_OFFSET+4] # Store head segment index in r9
+	# Store pos of old head in r8/r10
+	mov r8d, [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9]
+	mov r10d, [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4]
 	# Increment current head index, wrapping if necessary
 	inc r9d
 	cmp r9d, [rsp+SNAKE_OFFSET]; jb 0f
 	xor r9d, r9d
 	0:
-	# Write current head index back to stack
-	mov [rsp+SNAKE_OFFSET+4], r9d
+	mov [rsp+SNAKE_OFFSET+4], r9d # Write current head index back to stack
 
 	# Delete char of last tail
 	lea rdi, [rsp+TERMIOS_SIZE+SEED_SIZE]
@@ -248,9 +248,6 @@ _start:
 	mov word ptr [rdi], 'H' | ' ' << 8
 	add rdi, 2
 
-	# Store pos of old head in r8/r10
-	mov r8d, [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r13]
-	mov r10d, [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r13+4]
 	# Compute new head position
 	cmp r12d, 0; jne 0f
 	dec r10d; jmp 1f
@@ -292,8 +289,8 @@ _start:
 	# Ate apple: Write position of next segment
 	rand_apple_pos
 	# "Old" cell of new segment will be cleared: Set it outside of screen
-	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14], 32
-	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14+4], 32
+	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14], WIDTH+3
+	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14+4], HEIGHT+3
 
 	# Write new score
 	mov dword ptr [rdi], 0x1B | '[' << 8 | '\;' << 16 | '9' << 24
