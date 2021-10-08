@@ -65,8 +65,8 @@ struct termios {
 	tcflag_t c_iflag; // 4 bytes
 	tcflag_t c_oflag; // 4 bytes
 	tcflag_t c_cflag; // 4 bytes
-	tcflag_t c_lflag; // 4 bytes => 16 bytes
-	cc_t c_cc[NCCS]; // 32 bytes => 48
+	tcflag_t c_lflag; // 4 bytes
+	cc_t c_cc[NCCS]; // 32 bytes
 	speed_t c_ispeed; // 4 bytes
 	speed_t c_ospeed; // 4 bytes => 56 + 4 bytes padding = 60
 };
@@ -77,7 +77,6 @@ TERMIOS_SIZE = 60
 .macro write str, len
 	mov eax, SYS_write # use the write syscall
 	mov edi, STDOUT
-	# mov rsi, offset flat: \str
 	lea rsi, \str
 	mov rdx, \len # specify nr of characters
 	# Clobbers %rcx and %r11, and return value %rax
@@ -128,13 +127,13 @@ NUM_SEGMENTS = 128 # The maximum number of segments
 SEGMENT_BYTES = 8
 SNAKE_OFFSET = TERMIOS_SIZE + SEED_SIZE + DRAW_BUF_SIZE
 APPLE_DATA_SIZE = 8
-APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
+APPLE_OFFSET = SNAKE_OFFSET + NUM_SEGMENTS * SEGMENT_BYTES
 
 # Generates a random number.
 #
 # Output in ax. Clobbers cx.
 .macro rand
-	mov eax, [rsp+TERMIOS_SIZE] # Store current seed in rax
+	mov eax, [rsp+TERMIOS_SIZE] # Store current seed in ax
 	mov ecx, 0x8088405; mul ecx; inc eax
 	mov [rsp+TERMIOS_SIZE], eax
 .endm
@@ -150,36 +149,40 @@ APPLE_OFFSET = SNAKE_OFFSET + 4 + NUM_SEGMENTS * SEGMENT_BYTES
 .text
 _start:
 	# Allocate space on stack
-	sub rsp, TERMIOS_SIZE + SEED_SIZE + DRAW_BUF_SIZE + /* segmentCount */ 4 + NUM_SEGMENTS * SEGMENT_BYTES + APPLE_DATA_SIZE
+	sub rsp, TERMIOS_SIZE + SEED_SIZE + DRAW_BUF_SIZE + NUM_SEGMENTS * SEGMENT_BYTES + APPLE_DATA_SIZE
 
 	# Setup terminal
 	mov rax, SYS_ioctl
 	mov rdi, STDIN
 	mov rsi, TCGETS
-	lea rdx, [rsp]
+	lea rdx, [rsp+TERMIOS_SIZE]
 	syscall
 
 	# Make copy of termios struct
-	mov rax, [rsp+48]
-	movdqu xmm0, [rsp]
-	movdqu xmm1, [rsp+16]
-	movdqu xmm2, [rsp+32]
-	mov [rsp+TERMIOS_SIZE+48], rax
-	mov eax, [rsp+56]
-	movups [rsp+TERMIOS_SIZE], xmm0
-	movups [rsp+TERMIOS_SIZE+16], xmm1
-	movups [rsp+TERMIOS_SIZE+32], xmm2
+	mov rax, [rsp+TERMIOS_SIZE+48]
+	movdqu xmm0, [rsp+TERMIOS_SIZE]
+	movdqu xmm1, [rsp+TERMIOS_SIZE+16]
+	movdqu xmm2, [rsp+TERMIOS_SIZE+32]
+	mov [rsp+48], rax
+	mov eax, [rsp+TERMIOS_SIZE+56]
+	movups [rsp], xmm0
+	movups [rsp+16], xmm1
+	movups [rsp+32], xmm2
 	mov [rsp+56], eax
 
 	and dword ptr [rsp+TERMIOS_SIZE+12], ~(ICANON | ECHO) # Set local modes
-	mov byte ptr [rsp+TERMIOS_SIZE+17+VMIN], 0
-	mov byte ptr [rsp+TERMIOS_SIZE+17+VTIME], 0
-
-	# Write new terminal settings
+	.if VMIN != VTIME + 1
+	.err
+	.endif
+	mov word ptr [rsp+TERMIOS_SIZE+17+VTIME], 0 # Set VMIN/VTIME to zero
+	# Write new terminal settings (reusing old register values)
 	mov rax, SYS_ioctl
-	mov rdi, STDIN
-	mov rsi, TCSETS
-	lea rdx, [rsp+TERMIOS_SIZE]
+	# mov rdi, STDIN
+	.if TCSETS != TCGETS + 1
+	.err
+	.endif
+	inc rsi
+	# lea rdx, [rsp+TERMIOS_SIZE]
 	syscall
 
 	write clearAndHideCursor, clearAndHideCursor.len
@@ -191,11 +194,12 @@ _start:
 	xor edx, edx # No flags
 	syscall
 
+	mov r14d, 1 # Store num segments in r14
+	xor r9d, r9d # Store head segment index in r9
 	xor r12d, r12d # Store direction in r12
-	mov qword ptr [rsp+SNAKE_OFFSET], 1 # Start with single segment and write current head
 
-	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES], INITIAL_X # x-coord of initial segment
-	mov dword ptr [rsp+SNAKE_OFFSET+8+0*SEGMENT_BYTES+4], INITIAL_Y # y-coord of initial segment
+	mov dword ptr [rsp+SNAKE_OFFSET+0*SEGMENT_BYTES], INITIAL_X # x-coord of initial segment
+	mov dword ptr [rsp+SNAKE_OFFSET+0*SEGMENT_BYTES+4], INITIAL_Y # y-coord of initial segment
 	# Place initial apple in front of snake to only have to randomize
 	# apple positions below.
 	mov dword ptr [rsp+APPLE_OFFSET], INITIAL_X
@@ -214,52 +218,50 @@ _start:
 	jnz read_loop
 	mov al, [rsp-1]
 
-	cmp rax, 'w'; jne 0f; cmp r12d, 2; je 1f
-	mov r12d, 0; jmp 1f
-	0: cmp rax, 'a'; jne 0f; cmp r12d, 3; je 1f
-	mov r12d, 1; jmp 1f
-	0: cmp rax, 's'; jne 0f; cmp r12d, 0; je 1f
-	mov r12d, 2; jmp 1f
-	0: cmp rax, 'd'; jne 1f; cmp r12d, 1; je 1f
-	mov r12d, 3; jmp 1f
+	mov ecx, r12d
+	cmp eax, 'w'; jne 0f
+	mov ecx, 0; jmp 1f
+	0: cmp eax, 'a'; jne 0f
+	mov ecx, 1; jmp 1f
+	0: cmp eax, 's'; jne 0f
+	mov ecx, 2; jmp 1f
+	0: cmp eax, 'd'; jne 1f
+	mov ecx, 3
 	1:
+	mov eax, ecx
+	xor eax, r12d; bt eax, 0; cmovc r12d, ecx
 
-	mov r14d, [rsp+SNAKE_OFFSET] # Store current num segments in r14
-	mov r9d, [rsp+SNAKE_OFFSET+4] # Store head segment index in r9
 	# Store pos of old head in r8/r10
-	mov r8d, [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9]
-	mov r10d, [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4]
+	mov r8d, [rsp+SNAKE_OFFSET+SEGMENT_BYTES*r9]
+	mov r10d, [rsp+SNAKE_OFFSET+SEGMENT_BYTES*r9+4]
 	# Increment current head index, wrapping if necessary
 	inc r9d
-	cmp r9d, [rsp+SNAKE_OFFSET]; jb 0f
+	cmp r9d, r14d; jb 0f
 	xor r9d, r9d
 	0:
-	mov [rsp+SNAKE_OFFSET+4], r9d # Write current head index back to stack
 
 	# Delete char of last tail
 	lea rdi, [rsp+TERMIOS_SIZE+SEED_SIZE]
 	mov word ptr [rdi], 0x1B | '[' << 8
 	add rdi, 2
-	itoa "(dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
+	itoa "(dword ptr [rsp+SNAKE_OFFSET+SEGMENT_BYTES*r9+4])" # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
-	itoa "(dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
+	itoa "(dword ptr [rsp+SNAKE_OFFSET+SEGMENT_BYTES*r9])" # x-coord
 	mov word ptr [rdi], 'H' | ' ' << 8
 	add rdi, 2
 
 	# Compute new head position
-	cmp r12d, 0; jne 0f
-	dec r10d; jmp 1f
-	0: cmp r12d, 1; jne 0f
-	dec r8d; jmp 1f
-	0: cmp r12d, 2; jne 0f
-	inc r10d; jmp 1f
-	0: cmp r12d, 3; jne 1f
-	inc r8d; jmp 1f
-	1:
+	cmp r12d, 2; je 2f; ja 3f
+	cmp r12d, 0; jne 1f
+	dec r10d; jmp 0f
+	1: dec r8d; jmp 0f
+	2: inc r10d; jmp 0f
+	3: inc r8d; jmp 0f
+	0:
 	# Write new pos of snake head
-	mov [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9], r8d
-	mov [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4], r10d
+	mov [rsp+SNAKE_OFFSET+SEGMENT_BYTES*r9], r8d
+	mov [rsp+SNAKE_OFFSET+SEGMENT_BYTES*r9+4], r10d
 
 	# Check for collision against boundaries
 	cmp r8d, 2; jb exit
@@ -270,34 +272,32 @@ _start:
 	mov ecx, r9d
 	check_collision_loop:
 	inc ecx
-	cmp ecx, [rsp+SNAKE_OFFSET]; jb 0f
-	xor ecx, ecx  # If i == #segment, set i to zero
+	cmp ecx, r14d; jb 0f
+	xor ecx, ecx # Wrap around index
 	0:
-	# If checked againts all other segments already (i==segment_head): Exit
-	cmp ecx, r9d; je 1f
+	cmp ecx, r9d; je 0f # If checked againts all other segments already: Exit
 
-	cmp [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*rcx], r8d; jne 0f
-	cmp [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*rcx+4], r10d; jne 0f
+	cmp [rsp+SNAKE_OFFSET+SEGMENT_BYTES*rcx], r8d; jne 1f
+	cmp [rsp+SNAKE_OFFSET+SEGMENT_BYTES*rcx+4], r10d; jne 1f
 	jmp exit # Collision!
-	0:
-	jmp check_collision_loop
 	1:
+	jmp check_collision_loop
+	0:
 
 	cmp r8d, [rsp+APPLE_OFFSET]; jne 0f
 	cmp r10d, [rsp+APPLE_OFFSET+4]; jne 0f
 	# Ate apple: Write position of next segment
 	rand_apple_pos
 	# "Old" cell of new segment will be cleared: Set it outside of screen
-	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14], WIDTH+3
-	mov dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r14+4], HEIGHT+3
+	mov qword ptr [rsp+SNAKE_OFFSET+SEGMENT_BYTES*r14], WIDTH+3
 
 	# Write new score
 	mov dword ptr [rdi], 0x1B | '[' << 8 | '\;' << 16 | '9' << 24
 	mov byte ptr [rdi+4], 'H'
 	add rdi, 5
-	itoa [rsp+SNAKE_OFFSET], l=1
+	itoa r14d, l=1
 
-	inc dword ptr [rsp+SNAKE_OFFSET] # Increment segment count
+	inc r14d # Increment segment count
 	0:
 
 	mov word ptr [rdi], 0x1B | '[' << 8
@@ -306,16 +306,15 @@ _start:
 	mov byte ptr [rdi], '\;'
 	inc rdi
 	itoa [rsp+APPLE_OFFSET] # x-coord
-	mov word ptr [rdi], 'H' | 'o' << 8
-	add rdi, 2
+	# Note: This also begins printing the new head
+	mov dword ptr [rdi], 'H' | 'o' << 8 | 0x1B << 16 | '[' << 24
+	add rdi, 4
 
 	# Draw new head position
-	mov word ptr [rdi], 0x1B | '[' << 8
-	add rdi, 2
-	itoa "(dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9+4])" # y-coord
+	itoa "(dword ptr [rsp+SNAKE_OFFSET+SEGMENT_BYTES*r9+4])" # y-coord
 	mov byte ptr [rdi], '\;'
 	inc rdi
-	itoa "(dword ptr [rsp+SNAKE_OFFSET+8+SEGMENT_BYTES*r9])" # x-coord
+	itoa "(dword ptr [rsp+SNAKE_OFFSET+SEGMENT_BYTES*r9])" # x-coord
 	mov word ptr [rdi], 'H' | '#' << 8
 	add rdi, 2
 
@@ -339,5 +338,5 @@ _start:
 	syscall
 
 	mov rax, SYS_exit
-	mov rdi, 0 # Exit code
+	xor edi, edi # Exit with code 0
 	syscall

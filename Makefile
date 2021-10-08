@@ -1,6 +1,6 @@
-all: main
+all: snake
 
-main: main.s Makefile
+snake: main.s Makefile
 	gcc -m64 -nostdlib -s -o $@ \
 		-Wa,-Os -Wl,--nmagic,--build-id=none $<
 
