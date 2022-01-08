@@ -12,6 +12,7 @@
   meta = with lib; {
     description = "A remake of the game Snake";
     homepage = "https://github.com/axelf4/asm-snake";
+    license = with licenses; [ gpl3Plus ];
     platforms = [ "x86_64-linux" ];
   };
 }

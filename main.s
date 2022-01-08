@@ -1,48 +1,6 @@
+# Snake game in x86-64 assembly for Linux
+# Copyright (C) 2022  Axel Forsman
 .intel_syntax noprefix
-
-WIDTH = 32
-HEIGHT = 16
-INITIAL_X = 20
-INITIAL_Y = 10
-
-.macro const_itoa n
-	.if \n / 10
-	const_itoa "(\n / 10)"
-	.endif
-	.byte '0' + \n % 10
-.endm
-
-.section .rodata
-clearAndHideCursor:
-	.ascii "\033[?25l\033[2J\033[;H╔Score: "
-	.rept WIDTH-7
-	.ascii "═" 
-	.endr
-	.ascii "╗"
-	.rept HEIGHT
-	.ascii "\033[B\033[D║"
-	.endr
-	.ascii "\033[2;H"
-	.rept HEIGHT
-	.ascii "║\n"
-	.endr
-	.ascii "╚"
-	.rept WIDTH
-	.ascii "═"
-	.endr
-	.ascii "╝"
-clearAndHideCursor.len = . - clearAndHideCursor
-showCursor:
-	.ascii "\033["
-	const_itoa (HEIGHT+2)
-	.ascii ";2HGame over!\n\033[?25h"
-showCursor.len = . - showCursor
-
-F_SETFL = 4 /* Set file status flags. */
-O_RDONLY = 00
-O_NONBLOCK = 04000
-STDIN = 0
-STDOUT = 1
 
 SYS_read = 0x00
 SYS_write = 1
@@ -51,13 +9,14 @@ SYS_exit = 60
 SYS_nanosleep = 0x23
 SYS_getrandom = 0x13e
 
+STDIN = 0
+STDOUT = 1
+
 TCGETS = 0x00005401
 TCSETS = 0x00005402
-
 # termios.h
 ICANON = 0000002 # Canonical input (erase and kill processing)
 ECHO = 0000010 # Enable echo
-NCCS = 32 # Number of control characters
 VTIME = 5 # (0.1 second granularity)
 VMIN = 6
 /*
@@ -73,6 +32,15 @@ struct termios {
 */
 TERMIOS_SIZE = 60
 
+MILLI_TO_NANO = 1000000
+
+.macro const_itoa n
+	.if \n / 10
+	const_itoa "(\n / 10)"
+	.endif
+	.byte '0' + \n % 10
+.endm
+
 # write(stdout, str, len)
 .macro write str, len
 	mov eax, SYS_write # use the write syscall
@@ -83,20 +51,19 @@ TERMIOS_SIZE = 60
 	syscall
 .endm
 
-MILLI_TO_NANO = 1000000
-
 .macro sleep nanoseconds=0, seconds=0
 	pushq \nanoseconds
 	pushq \seconds
-	mov eax, SYS_nanosleep # use the nanosleep syscall
+	mov eax, SYS_nanosleep
 	mov rdi, rsp
-	xor esi, esi # rem=NULL (writing 32-bit register zeros upper 32 bits)
+	xor esi, esi # rem=NULL
 	syscall
 	add rsp, 2 * 8 # Pop two qwords from stack
 .endm
 
-# Clobbers: ax, cx, dx, si, r11
-# Note: n has to be positive
+# Writes the digits of the given positive integer.
+#
+# Clobbers ax, cx, dx, si and r11.
 .macro itoa n=0 l=0
 	# First count the number of digits
 	mov ecx, \n
@@ -120,9 +87,13 @@ MILLI_TO_NANO = 1000000
 	add rdi, r11
 .endm
 
+WIDTH = 32
+HEIGHT = 16
+INITIAL_X = 20
+INITIAL_Y = 10
+
 SEED_SIZE = 4
 DRAW_BUF_SIZE = 48
-
 NUM_SEGMENTS = 128 # The maximum number of segments
 SEGMENT_BYTES = 8
 SNAKE_OFFSET = TERMIOS_SIZE + SEED_SIZE + DRAW_BUF_SIZE
@@ -144,6 +115,34 @@ APPLE_OFFSET = SNAKE_OFFSET + NUM_SEGMENTS * SEGMENT_BYTES
 	mov [rsp+APPLE_OFFSET], ax
 	shr eax, 16; mov [rsp+APPLE_OFFSET+4], eax
 .endm
+
+.section .rodata
+initialOutput:
+	# Clear and hide cursor
+	.ascii "\033[?25l\033[2J\033[;H╔Score: "
+	.rept WIDTH-7
+	.ascii "═" 
+	.endr
+	.ascii "╗"
+	.rept HEIGHT
+	.ascii "\033[B\033[D║"
+	.endr
+	.ascii "\033[2;H"
+	.rept HEIGHT
+	.ascii "║\n"
+	.endr
+	.ascii "╚"
+	.rept WIDTH
+	.ascii "═"
+	.endr
+	.ascii "╝"
+initialOutput.len = . - initialOutput
+finalOutput:
+	.ascii "\033["
+	const_itoa (HEIGHT+2)
+	# Show cursor
+	.ascii ";2HGame over!\n\033[?25h"
+finalOutput.len = . - finalOutput
 
 .global _start
 .text
@@ -185,7 +184,7 @@ _start:
 	# lea rdx, [rsp+TERMIOS_SIZE]
 	syscall
 
-	write clearAndHideCursor, clearAndHideCursor.len
+	write initialOutput, initialOutput.len
 
 	# Get RNG seed
 	mov rax, SYS_getrandom
@@ -329,7 +328,7 @@ _start:
 	jmp main_loop
 
 	exit:
-	write showCursor, showCursor.len
+	write finalOutput, finalOutput.len
 	# Restore previous terminal settings
 	mov rax, SYS_ioctl
 	mov rdi, STDIN
